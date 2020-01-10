@@ -1,13 +1,12 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-
-// +build cgo
 
 #include <pthread.h>
 #include <string.h>
 #include <signal.h>
 #include "libcgo.h"
+#include "libcgo_unix.h"
 
 static void *threadentry(void*);
 static void (*setg_gcc)(void*);
@@ -48,14 +47,14 @@ _cgo_sys_thread_start(ThreadStart *ts)
 
 	// Not sure why the memset is necessary here,
 	// but without it, we get a bogus stack size
-	// out of pthread_attr_getstacksize.  C'est la Linux.
+	// out of pthread_attr_getstacksize. C'est la Linux.
 	memset(&attr, 0, sizeof attr);
 	pthread_attr_init(&attr);
 	size = 0;
 	pthread_attr_getstacksize(&attr, &size);
 	// Leave stacklo=0 and set stackhi=size; mstack will do the rest.
 	ts->g->stackhi = size;
-	err = pthread_create(&p, &attr, threadentry, ts);
+	err = _cgo_try_pthread_create(&p, &attr, threadentry, ts);
 
 	pthread_sigmask(SIG_SETMASK, &oset, nil);
 

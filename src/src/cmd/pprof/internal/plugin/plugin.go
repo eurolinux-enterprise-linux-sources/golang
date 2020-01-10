@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"cmd/pprof/internal/profile"
+	"internal/pprof/profile"
 )
 
 // A FlagSet creates and parses command-line flags.

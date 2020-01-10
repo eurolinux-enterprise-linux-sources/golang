@@ -68,7 +68,6 @@ func goargs() {
 	if GOOS == "windows" {
 		return
 	}
-
 	argslice = make([]string, argc)
 	for i := int32(0); i < argc; i++ {
 		argslice[i] = gostringnocopy(argv_index(argv, i))
@@ -77,7 +76,7 @@ func goargs() {
 
 func goenvs_unix() {
 	// TODO(austin): ppc64 in dynamic linking mode doesn't
-	// guarantee env[] will immediately follow argv.  Might cause
+	// guarantee env[] will immediately follow argv. Might cause
 	// problems.
 	n := int32(0)
 	for argv_index(argv, argc+1+n) != nil {
@@ -242,7 +241,7 @@ func check() {
 
 	k = unsafe.Pointer(uintptr(0xfedcb123))
 	if sys.PtrSize == 8 {
-		k = unsafe.Pointer(uintptr(unsafe.Pointer(k)) << 10)
+		k = unsafe.Pointer(uintptr(k) << 10)
 	}
 	if casp(&k, nil, nil) {
 		throw("casp1")
@@ -259,6 +258,12 @@ func check() {
 	atomic.Or8(&m[1], 0xf0)
 	if m[0] != 1 || m[1] != 0xf1 || m[2] != 1 || m[3] != 1 {
 		throw("atomicor8")
+	}
+
+	m = [4]byte{0xff, 0xff, 0xff, 0xff}
+	atomic.And8(&m[1], 0x1)
+	if m[0] != 0xff || m[1] != 0x1 || m[2] != 0xff || m[3] != 0xff {
+		throw("atomicand8")
 	}
 
 	*(*uint64)(unsafe.Pointer(&j)) = ^uint64(0)
@@ -322,6 +327,7 @@ var debug struct {
 	gcshrinkstackoff  int32
 	gcstackbarrieroff int32
 	gcstackbarrierall int32
+	gcrescanstacks    int32
 	gcstoptheworld    int32
 	gctrace           int32
 	invalidptr        int32
@@ -341,6 +347,7 @@ var dbgvars = []dbgVar{
 	{"gcshrinkstackoff", &debug.gcshrinkstackoff},
 	{"gcstackbarrieroff", &debug.gcstackbarrieroff},
 	{"gcstackbarrierall", &debug.gcstackbarrierall},
+	{"gcrescanstacks", &debug.gcrescanstacks},
 	{"gcstoptheworld", &debug.gcstoptheworld},
 	{"gctrace", &debug.gctrace},
 	{"invalidptr", &debug.invalidptr},
@@ -374,11 +381,15 @@ func parsedebugvars() {
 		// is int, not int32, and should only be updated
 		// if specified in GODEBUG.
 		if key == "memprofilerate" {
-			MemProfileRate = atoi(value)
+			if n, ok := atoi(value); ok {
+				MemProfileRate = n
+			}
 		} else {
 			for _, v := range dbgvars {
 				if v.name == key {
-					*v.value = int32(atoi(value))
+					if n, ok := atoi32(value); ok {
+						*v.value = n
+					}
 				}
 			}
 		}
@@ -386,6 +397,13 @@ func parsedebugvars() {
 
 	setTraceback(gogetenv("GOTRACEBACK"))
 	traceback_env = traceback_cache
+
+	if debug.gcrescanstacks == 0 {
+		// Without rescanning, there's no need for stack
+		// barriers.
+		debug.gcstackbarrieroff = 1
+		debug.gcstackbarrierall = 0
+	}
 
 	if debug.gcstackbarrierall > 0 {
 		firstStackBarrierOffset = 0
@@ -414,7 +432,10 @@ func setTraceback(level string) {
 	case "crash":
 		t = 2<<tracebackShift | tracebackAll | tracebackCrash
 	default:
-		t = uint32(atoi(level))<<tracebackShift | tracebackAll
+		t = tracebackAll
+		if n, ok := atoi(level); ok && n == int(uint32(n)) {
+			t |= uint32(n) << tracebackShift
+		}
 	}
 	// when C owns the process, simply exit'ing the process on fatal errors
 	// and panics is surprising. Be louder and abort instead.
@@ -477,10 +498,52 @@ func gomcache() *mcache {
 }
 
 //go:linkname reflect_typelinks reflect.typelinks
-func reflect_typelinks() [][]*_type {
-	ret := [][]*_type{firstmoduledata.typelinks}
-	for datap := firstmoduledata.next; datap != nil; datap = datap.next {
-		ret = append(ret, datap.typelinks)
+func reflect_typelinks() ([]unsafe.Pointer, [][]int32) {
+	modules := activeModules()
+	sections := []unsafe.Pointer{unsafe.Pointer(modules[0].types)}
+	ret := [][]int32{modules[0].typelinks}
+	for _, md := range modules[1:] {
+		sections = append(sections, unsafe.Pointer(md.types))
+		ret = append(ret, md.typelinks)
 	}
-	return ret
+	return sections, ret
+}
+
+// reflect_resolveNameOff resolves a name offset from a base pointer.
+//go:linkname reflect_resolveNameOff reflect.resolveNameOff
+func reflect_resolveNameOff(ptrInModule unsafe.Pointer, off int32) unsafe.Pointer {
+	return unsafe.Pointer(resolveNameOff(ptrInModule, nameOff(off)).bytes)
+}
+
+// reflect_resolveTypeOff resolves an *rtype offset from a base type.
+//go:linkname reflect_resolveTypeOff reflect.resolveTypeOff
+func reflect_resolveTypeOff(rtype unsafe.Pointer, off int32) unsafe.Pointer {
+	return unsafe.Pointer((*_type)(rtype).typeOff(typeOff(off)))
+}
+
+// reflect_resolveTextOff resolves an function pointer offset from a base type.
+//go:linkname reflect_resolveTextOff reflect.resolveTextOff
+func reflect_resolveTextOff(rtype unsafe.Pointer, off int32) unsafe.Pointer {
+	return (*_type)(rtype).textOff(textOff(off))
+
+}
+
+// reflect_addReflectOff adds a pointer to the reflection offset lookup map.
+//go:linkname reflect_addReflectOff reflect.addReflectOff
+func reflect_addReflectOff(ptr unsafe.Pointer) int32 {
+	reflectOffsLock()
+	if reflectOffs.m == nil {
+		reflectOffs.m = make(map[int32]unsafe.Pointer)
+		reflectOffs.minv = make(map[unsafe.Pointer]int32)
+		reflectOffs.next = -1
+	}
+	id, found := reflectOffs.minv[ptr]
+	if !found {
+		id = reflectOffs.next
+		reflectOffs.next-- // use negative offsets as IDs to aid debugging
+		reflectOffs.m[id] = ptr
+		reflectOffs.minv[ptr] = id
+	}
+	reflectOffsUnlock()
+	return id
 }

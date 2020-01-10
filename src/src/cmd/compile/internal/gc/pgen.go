@@ -5,25 +5,25 @@
 package gc
 
 import (
+	"cmd/compile/internal/ssa"
 	"cmd/internal/obj"
-	"crypto/md5"
+	"cmd/internal/sys"
 	"fmt"
+	"sort"
 	"strings"
 )
 
 // "Portable" code generation.
 
-var makefuncdatasym_nsym int32
+var makefuncdatasym_nsym int
 
-func makefuncdatasym(namefmt string, funcdatakind int64) *Sym {
-	var nod Node
-
-	sym := Lookupf(namefmt, makefuncdatasym_nsym)
+func makefuncdatasym(nameprefix string, funcdatakind int64) *Sym {
+	sym := lookupN(nameprefix, makefuncdatasym_nsym)
 	makefuncdatasym_nsym++
 	pnod := newname(sym)
 	pnod.Class = PEXTERN
-	Nodconst(&nod, Types[TINT32], funcdatakind)
-	Thearch.Gins(obj.AFUNCDATA, &nod, pnod)
+	p := Gins(obj.AFUNCDATA, nil, pnod)
+	Addrconst(&p.From, funcdatakind)
 	return sym
 }
 
@@ -83,21 +83,26 @@ func makefuncdatasym(namefmt string, funcdatakind int64) *Sym {
 // that its argument is certainly dead, for use when the liveness analysis
 // would not otherwise be able to deduce that fact.
 
-func gvardefx(n *Node, as int) {
+func gvardefx(n *Node, as obj.As) {
 	if n == nil {
 		Fatalf("gvardef nil")
 	}
 	if n.Op != ONAME {
-		Yyerror("gvardef %v; %v", Oconv(int(n.Op), obj.FmtSharp), n)
+		yyerror("gvardef %#v; %v", n.Op, n)
 		return
 	}
 
 	switch n.Class {
 	case PAUTO, PPARAM, PPARAMOUT:
+		if !n.Used {
+			Prog(obj.ANOP)
+			return
+		}
+
 		if as == obj.AVARLIVE {
-			Thearch.Gins(as, n, nil)
+			Gins(as, n, nil)
 		} else {
-			Thearch.Gins(as, nil, n)
+			Gins(as, nil, n)
 		}
 	}
 }
@@ -106,16 +111,39 @@ func Gvardef(n *Node) {
 	gvardefx(n, obj.AVARDEF)
 }
 
-func gvarkill(n *Node) {
+func Gvarkill(n *Node) {
 	gvardefx(n, obj.AVARKILL)
 }
 
-func gvarlive(n *Node) {
+func Gvarlive(n *Node) {
 	gvardefx(n, obj.AVARLIVE)
 }
 
 func removevardef(firstp *obj.Prog) {
+	// At VARKILLs, zero variable if it is ambiguously live.
+	// After the VARKILL anything this variable references
+	// might be collected. If it were to become live again later,
+	// the GC will see references to already-collected objects.
+	// See issue 20029.
 	for p := firstp; p != nil; p = p.Link {
+		if p.As != obj.AVARKILL {
+			continue
+		}
+		n := p.To.Node.(*Node)
+		if !n.Name.Needzero {
+			continue
+		}
+		if n.Class != PAUTO {
+			Fatalf("zero of variable which isn't PAUTO %v", n)
+		}
+		if n.Type.Size()%int64(Widthptr) != 0 {
+			Fatalf("zero of variable not a multiple of ptr size %v", n)
+		}
+		Thearch.ZeroAuto(n, p)
+	}
+
+	for p := firstp; p != nil; p = p.Link {
+
 		for p.Link != nil && (p.Link.As == obj.AVARDEF || p.Link.As == obj.AVARKILL || p.Link.As == obj.AVARLIVE) {
 			p.Link = p.Link.Link
 		}
@@ -127,49 +155,36 @@ func removevardef(firstp *obj.Prog) {
 	}
 }
 
-func gcsymdup(s *Sym) {
-	ls := Linksym(s)
-	if len(ls.R) > 0 {
-		Fatalf("cannot rosymdup %s with relocations", ls.Name)
-	}
-	ls.Name = fmt.Sprintf("gclocals·%x", md5.Sum(ls.P))
-	ls.Dupok = 1
-}
-
 func emitptrargsmap() {
 	if Curfn.Func.Nname.Sym.Name == "_" {
 		return
 	}
-	sym := Lookup(fmt.Sprintf("%s.args_stackmap", Curfn.Func.Nname.Sym.Name))
+	sym := lookup(fmt.Sprintf("%s.args_stackmap", Curfn.Func.Nname.Sym.Name))
 
-	nptr := int(Curfn.Type.Argwid / int64(Widthptr))
+	nptr := int(Curfn.Type.ArgWidth() / int64(Widthptr))
 	bv := bvalloc(int32(nptr) * 2)
 	nbitmap := 1
-	if Curfn.Type.Outtuple > 0 {
+	if Curfn.Type.Results().NumFields() > 0 {
 		nbitmap = 2
 	}
 	off := duint32(sym, 0, uint32(nbitmap))
 	off = duint32(sym, off, uint32(bv.n))
 	var xoffset int64
-	if Curfn.Type.Thistuple > 0 {
+	if Curfn.IsMethod() {
 		xoffset = 0
-		onebitwalktype1(getthisx(Curfn.Type), &xoffset, bv)
+		onebitwalktype1(Curfn.Type.Recvs(), &xoffset, bv)
 	}
 
-	if Curfn.Type.Intuple > 0 {
+	if Curfn.Type.Params().NumFields() > 0 {
 		xoffset = 0
-		onebitwalktype1(getinargx(Curfn.Type), &xoffset, bv)
+		onebitwalktype1(Curfn.Type.Params(), &xoffset, bv)
 	}
 
-	for j := 0; int32(j) < bv.n; j += 32 {
-		off = duint32(sym, off, bv.b[j/32])
-	}
-	if Curfn.Type.Outtuple > 0 {
+	off = dbvec(sym, off, bv)
+	if Curfn.Type.Results().NumFields() > 0 {
 		xoffset = 0
-		onebitwalktype1(getoutargx(Curfn.Type), &xoffset, bv)
-		for j := 0; int32(j) < bv.n; j += 32 {
-			off = duint32(sym, off, bv.b[j/32])
-		}
+		onebitwalktype1(Curfn.Type.Results(), &xoffset, bv)
+		off = dbvec(sym, off, bv)
 	}
 
 	ggloblsym(sym, int32(off), obj.RODATA|obj.LOCAL)
@@ -186,21 +201,12 @@ func emitptrargsmap() {
 // the top of the stack and increasing in size.
 // Non-autos sort on offset.
 func cmpstackvarlt(a, b *Node) bool {
-	if a.Class != b.Class {
-		if a.Class == PAUTO {
-			return false
-		}
-		return true
+	if (a.Class == PAUTO) != (b.Class == PAUTO) {
+		return b.Class == PAUTO
 	}
 
 	if a.Class != PAUTO {
-		if a.Xoffset < b.Xoffset {
-			return true
-		}
-		if a.Xoffset > b.Xoffset {
-			return false
-		}
-		return false
+		return a.Xoffset < b.Xoffset
 	}
 
 	if a.Used != b.Used {
@@ -219,72 +225,75 @@ func cmpstackvarlt(a, b *Node) bool {
 		return ap
 	}
 
-	if a.Type.Width < b.Type.Width {
-		return false
-	}
-	if a.Type.Width > b.Type.Width {
-		return true
+	if a.Type.Width != b.Type.Width {
+		return a.Type.Width > b.Type.Width
 	}
 
 	return a.Sym.Name < b.Sym.Name
 }
 
-// stkdelta records the stack offset delta for a node
-// during the compaction of the stack frame to remove
-// unused stack slots.
-var stkdelta = map[*Node]int64{}
+// byStackvar implements sort.Interface for []*Node using cmpstackvarlt.
+type byStackVar []*Node
 
-// TODO(lvd) find out where the PAUTO/OLITERAL nodes come from.
-func allocauto(ptxt *obj.Prog) {
+func (s byStackVar) Len() int           { return len(s) }
+func (s byStackVar) Less(i, j int) bool { return cmpstackvarlt(s[i], s[j]) }
+func (s byStackVar) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+var scratchFpMem *Node
+
+func (s *ssaExport) AllocFrame(f *ssa.Func) {
 	Stksize = 0
 	stkptrsize = 0
 
-	if Curfn.Func.Dcl == nil {
-		return
-	}
-
 	// Mark the PAUTO's unused.
-	for ll := Curfn.Func.Dcl; ll != nil; ll = ll.Next {
-		if ll.N.Class == PAUTO {
-			ll.N.Used = false
+	for _, ln := range Curfn.Func.Dcl {
+		if ln.Class == PAUTO {
+			ln.Used = false
 		}
 	}
 
-	markautoused(ptxt)
+	for _, l := range f.RegAlloc {
+		if ls, ok := l.(ssa.LocalSlot); ok {
+			ls.N.(*Node).Used = true
+		}
 
-	listsort(&Curfn.Func.Dcl, cmpstackvarlt)
-
-	// Unused autos are at the end, chop 'em off.
-	ll := Curfn.Func.Dcl
-
-	n := ll.N
-	if n.Class == PAUTO && n.Op == ONAME && !n.Used {
-		// No locals used at all
-		Curfn.Func.Dcl = nil
-
-		fixautoused(ptxt)
-		return
 	}
 
-	for ll := Curfn.Func.Dcl; ll.Next != nil; ll = ll.Next {
-		n = ll.Next.N
-		if n.Class == PAUTO && n.Op == ONAME && !n.Used {
-			ll.Next = nil
-			Curfn.Func.Dcl.End = ll
-			break
+	scratchUsed := false
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			switch a := v.Aux.(type) {
+			case *ssa.ArgSymbol:
+				a.Node.(*Node).Used = true
+			case *ssa.AutoSymbol:
+				a.Node.(*Node).Used = true
+			}
+
+			if !scratchUsed {
+				scratchUsed = v.Op.UsesScratch()
+			}
 		}
 	}
 
-	// Reassign stack offsets of the locals that are still there.
-	var w int64
-	for ll := Curfn.Func.Dcl; ll != nil; ll = ll.Next {
-		n = ll.N
-		if n.Class != PAUTO || n.Op != ONAME {
+	if f.Config.NeedsFpScratch {
+		scratchFpMem = temp(Types[TUINT64])
+		scratchFpMem.Used = scratchUsed
+	}
+
+	sort.Sort(byStackVar(Curfn.Func.Dcl))
+
+	// Reassign stack offsets of the locals that are used.
+	for i, n := range Curfn.Func.Dcl {
+		if n.Op != ONAME || n.Class != PAUTO {
 			continue
+		}
+		if !n.Used {
+			Curfn.Func.Dcl = Curfn.Func.Dcl[:i]
+			break
 		}
 
 		dowidth(n.Type)
-		w = n.Type.Width
+		w := n.Type.Width
 		if w >= Thearch.MAXWIDTH || w < 0 {
 			Fatalf("bad width")
 		}
@@ -293,53 +302,19 @@ func allocauto(ptxt *obj.Prog) {
 		if haspointers(n.Type) {
 			stkptrsize = Stksize
 		}
-		if Thearch.Thechar == '0' || Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9' {
+		if Thearch.LinkArch.InFamily(sys.MIPS, sys.MIPS64, sys.ARM, sys.ARM64, sys.PPC64, sys.S390X) {
 			Stksize = Rnd(Stksize, int64(Widthptr))
 		}
 		if Stksize >= 1<<31 {
 			setlineno(Curfn)
-			Yyerror("stack frame too large (>2GB)")
+			yyerror("stack frame too large (>2GB)")
 		}
 
-		stkdelta[n] = -Stksize - n.Xoffset
+		n.Xoffset = -Stksize
 	}
 
 	Stksize = Rnd(Stksize, int64(Widthreg))
 	stkptrsize = Rnd(stkptrsize, int64(Widthreg))
-
-	fixautoused(ptxt)
-
-	// The debug information needs accurate offsets on the symbols.
-	for ll := Curfn.Func.Dcl; ll != nil; ll = ll.Next {
-		if ll.N.Class != PAUTO || ll.N.Op != ONAME {
-			continue
-		}
-		ll.N.Xoffset += stkdelta[ll.N]
-		delete(stkdelta, ll.N)
-	}
-}
-
-func Cgen_checknil(n *Node) {
-	if Disable_checknil != 0 {
-		return
-	}
-
-	// Ideally we wouldn't see any integer types here, but we do.
-	if n.Type == nil || (!Isptr[n.Type.Etype] && !Isint[n.Type.Etype] && n.Type.Etype != TUNSAFEPTR) {
-		Dump("checknil", n)
-		Fatalf("bad checknil")
-	}
-
-	if ((Thearch.Thechar == '0' || Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9') && n.Op != OREGISTER) || !n.Addable || n.Op == OLITERAL {
-		var reg Node
-		Regalloc(&reg, Types[Tptr], n)
-		Cgen(n, &reg)
-		Thearch.Gins(obj.ACHECKNIL, &reg, nil)
-		Regfree(&reg)
-		return
-	}
-
-	Thearch.Gins(obj.ACHECKNIL, n, nil)
 }
 
 func compile(fn *Node) {
@@ -347,91 +322,80 @@ func compile(fn *Node) {
 		Newproc = Sysfunc("newproc")
 		Deferproc = Sysfunc("deferproc")
 		Deferreturn = Sysfunc("deferreturn")
-		Panicindex = Sysfunc("panicindex")
+		panicindex = Sysfunc("panicindex")
 		panicslice = Sysfunc("panicslice")
-		throwreturn = Sysfunc("throwreturn")
+		panicdivide = Sysfunc("panicdivide")
+		growslice = Sysfunc("growslice")
+		panicdottype = Sysfunc("panicdottype")
+		panicnildottype = Sysfunc("panicnildottype")
+		assertE2I = Sysfunc("assertE2I")
+		assertE2I2 = Sysfunc("assertE2I2")
+		assertI2I = Sysfunc("assertI2I")
+		assertI2I2 = Sysfunc("assertI2I2")
 	}
 
-	lno := setlineno(fn)
+	defer func(lno int32) {
+		lineno = lno
+	}(setlineno(fn))
 
 	Curfn = fn
 	dowidth(Curfn.Type)
 
-	var oldstksize int64
-	var nod1 Node
-	var ptxt *obj.Prog
-	var pl *obj.Plist
-	var p *obj.Prog
-	var n *Node
-	var nam *Node
-	var gcargs *Sym
-	var gclocals *Sym
-	if fn.Nbody == nil {
-		if pure_go != 0 || strings.HasPrefix(fn.Func.Nname.Sym.Name, "init.") {
-			Yyerror("missing function body for %q", fn.Func.Nname.Sym.Name)
-			goto ret
+	if fn.Nbody.Len() == 0 {
+		if pure_go || strings.HasPrefix(fn.Func.Nname.Sym.Name, "init.") {
+			yyerror("missing function body for %q", fn.Func.Nname.Sym.Name)
+			return
 		}
 
-		if Debug['A'] != 0 {
-			goto ret
-		}
 		emitptrargsmap()
-		goto ret
+		return
 	}
 
 	saveerrors()
 
-	// set up domain for labels
-	clearlabels()
-
-	if Curfn.Type.Outnamed {
+	if Curfn.Type.FuncType().Outnamed {
 		// add clearing of the output parameters
-		var save Iter
-		t := Structfirst(&save, Getoutarg(Curfn.Type))
-
-		for t != nil {
+		for _, t := range Curfn.Type.Results().Fields().Slice() {
 			if t.Nname != nil {
-				n = Nod(OAS, t.Nname, nil)
-				typecheck(&n, Etop)
-				Curfn.Nbody = concat(list1(n), Curfn.Nbody)
+				n := nod(OAS, t.Nname, nil)
+				n = typecheck(n, Etop)
+				Curfn.Nbody.Prepend(n)
 			}
-
-			t = structnext(&save)
 		}
 	}
 
 	order(Curfn)
 	if nerrors != 0 {
-		goto ret
+		return
 	}
 
 	hasdefer = false
 	walk(Curfn)
 	if nerrors != 0 {
-		goto ret
+		return
 	}
 	if instrumenting {
 		instrument(Curfn)
 	}
 	if nerrors != 0 {
-		goto ret
+		return
 	}
 
-	continpc = nil
-	breakpc = nil
+	// Build an SSA backend function.
+	ssafn := buildssa(Curfn)
+	if nerrors != 0 {
+		return
+	}
 
-	pl = newplist()
-	pl.Name = Linksym(Curfn.Func.Nname.Sym)
+	newplist()
 
 	setlineno(Curfn)
 
-	Nodconst(&nod1, Types[TINT32], 0)
-	nam = Curfn.Func.Nname
+	nam := Curfn.Func.Nname
 	if isblank(nam) {
 		nam = nil
 	}
-	ptxt = Thearch.Gins(obj.ATEXT, nam, &nod1)
-	Afunclit(&ptxt.From, Curfn.Func.Nname)
+	ptxt := Gins(obj.ATEXT, nam, nil)
 	ptxt.From3 = new(obj.Addr)
 	if fn.Func.Dupok {
 		ptxt.From3.Offset |= obj.DUPOK
@@ -439,119 +403,72 @@ func compile(fn *Node) {
 	if fn.Func.Wrapper {
 		ptxt.From3.Offset |= obj.WRAPPER
 	}
+	if fn.Func.NoFramePointer {
+		ptxt.From3.Offset |= obj.NOFRAME
+	}
 	if fn.Func.Needctxt {
 		ptxt.From3.Offset |= obj.NEEDCTXT
 	}
-	if fn.Func.Nosplit {
+	if fn.Func.Pragma&Nosplit != 0 {
 		ptxt.From3.Offset |= obj.NOSPLIT
 	}
-	if fn.Func.Systemstack {
-		ptxt.From.Sym.Cfunc = 1
+	if fn.Func.ReflectMethod {
+		ptxt.From3.Offset |= obj.REFLECTMETHOD
+	}
+	if fn.Func.Pragma&Systemstack != 0 {
+		ptxt.From.Sym.Set(obj.AttrCFunc, true)
 	}
 
 	// Clumsy but important.
 	// See test/recover.go for test cases and src/reflect/value.go
 	// for the actual functions being considered.
-	if myimportpath != "" && myimportpath == "reflect" {
+	if myimportpath == "reflect" {
 		if Curfn.Func.Nname.Sym.Name == "callReflect" || Curfn.Func.Nname.Sym.Name == "callMethod" {
 			ptxt.From3.Offset |= obj.WRAPPER
 		}
 	}
 
-	ginit()
+	gcargs := makefuncdatasym("gcargs·", obj.FUNCDATA_ArgsPointerMaps)
+	gclocals := makefuncdatasym("gclocals·", obj.FUNCDATA_LocalsPointerMaps)
 
-	gcargs = makefuncdatasym("gcargs·%d", obj.FUNCDATA_ArgsPointerMaps)
-	gclocals = makefuncdatasym("gclocals·%d", obj.FUNCDATA_LocalsPointerMaps)
-
-	for _, t := range Curfn.Func.Fieldtrack {
-		gtrack(tracksym(t))
+	if obj.Fieldtrack_enabled != 0 && len(Curfn.Func.FieldTrack) > 0 {
+		trackSyms := make([]*Sym, 0, len(Curfn.Func.FieldTrack))
+		for sym := range Curfn.Func.FieldTrack {
+			trackSyms = append(trackSyms, sym)
+		}
+		sort.Sort(symByName(trackSyms))
+		for _, sym := range trackSyms {
+			gtrack(sym)
+		}
 	}
 
-	for l := fn.Func.Dcl; l != nil; l = l.Next {
-		n = l.N
+	for _, n := range fn.Func.Dcl {
 		if n.Op != ONAME { // might be OTYPE or OLITERAL
 			continue
 		}
 		switch n.Class {
-		case PAUTO, PPARAM, PPARAMOUT:
-			Nodconst(&nod1, Types[TUINTPTR], l.N.Type.Width)
-			p = Thearch.Gins(obj.ATYPE, l.N, &nod1)
-			p.From.Gotype = Linksym(ngotype(l.N))
+		case PAUTO:
+			if !n.Used {
+				continue
+			}
+			fallthrough
+		case PPARAM, PPARAMOUT:
+			// The symbol is excluded later from debugging info if its name begins ".autotmp_", but the type is still necessary.
+			// See bugs #17644 and #17830 and cmd/internal/dwarf/dwarf.go
+			p := Gins(obj.ATYPE, n, nil)
+			p.From.Sym = obj.Linklookup(Ctxt, n.Sym.Name, 0)
+			p.To.Type = obj.TYPE_MEM
+			p.To.Name = obj.NAME_EXTERN
+			p.To.Sym = Linksym(ngotype(n))
 		}
 	}
 
-	Genlist(Curfn.Func.Enter)
-	Genlist(Curfn.Nbody)
-	gclean()
-	checklabels()
-	if nerrors != 0 {
-		goto ret
-	}
-	if Curfn.Func.Endlineno != 0 {
-		lineno = Curfn.Func.Endlineno
-	}
-
-	if Curfn.Type.Outtuple != 0 {
-		Ginscall(throwreturn, 0)
-	}
-
-	ginit()
-
-	// TODO: Determine when the final cgen_ret can be omitted. Perhaps always?
-	cgen_ret(nil)
-
-	if hasdefer {
-		// deferreturn pretends to have one uintptr argument.
-		// Reserve space for it so stack scanner is happy.
-		if Maxarg < int64(Widthptr) {
-			Maxarg = int64(Widthptr)
-		}
-	}
-
-	gclean()
-	if nerrors != 0 {
-		goto ret
-	}
-
-	Pc.As = obj.ARET // overwrite AEND
-	Pc.Lineno = lineno
-
-	fixjmp(ptxt)
-	if Debug['N'] == 0 || Debug['R'] != 0 || Debug['P'] != 0 {
-		regopt(ptxt)
-		nilopt(ptxt)
-	}
-
-	Thearch.Expandchecks(ptxt)
-
-	oldstksize = Stksize
-	allocauto(ptxt)
-
-	if false {
-		fmt.Printf("allocauto: %d to %d\n", oldstksize, int64(Stksize))
-	}
-
-	setlineno(Curfn)
-	if int64(Stksize)+Maxarg > 1<<31 {
-		Yyerror("stack frame too large (>2GB)")
-		goto ret
-	}
-
-	// Emit garbage collection symbols.
-	liveness(Curfn, ptxt, gcargs, gclocals)
-
-	gcsymdup(gcargs)
-	gcsymdup(gclocals)
-
-	Thearch.Defframe(ptxt)
-
-	if Debug['f'] != 0 {
-		frame(0)
-	}
-
-	// Remove leftover instrumentation from the instruction stream.
-	removevardef(ptxt)
-
-ret:
-	lineno = lno
+	genssa(ssafn, ptxt, gcargs, gclocals)
+	ssafn.Free()
 }
+
+type symByName []*Sym
+
+func (a symByName) Len() int           { return len(a) }
+func (a symByName) Less(i, j int) bool { return a[i].Name < a[j].Name }
+func (a symByName) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }

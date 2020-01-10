@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sched.h>
 #include <pthread.h>
 
@@ -44,11 +45,11 @@ static void init() {
 
 // Test raising SIGIO on a C thread with an alternate signal stack
 // when there is a Go signal handler for SIGIO.
-static void* thread1(void* arg) {
-	pthread_t* ptid = (pthread_t*)(arg);
+static void* thread1(void* arg __attribute__ ((unused))) {
 	stack_t ss;
 	int i;
 	stack_t nss;
+	struct timespec ts;
 
 	// Set up an alternate signal stack for this thread.
 	memset(&ss, 0, sizeof ss);
@@ -65,7 +66,7 @@ static void* thread1(void* arg) {
 	// Send ourselves a SIGIO.  This will be caught by the Go
 	// signal handler which should forward to the C signal
 	// handler.
-	i = pthread_kill(*ptid, SIGIO);
+	i = pthread_kill(pthread_self(), SIGIO);
 	if (i != 0) {
 		fprintf(stderr, "pthread_kill: %s\n", strerror(i));
 		exit(EXIT_FAILURE);
@@ -74,11 +75,11 @@ static void* thread1(void* arg) {
 	// Wait until the signal has been delivered.
 	i = 0;
 	while (SIGIOCount() == 0) {
-		if (sched_yield() < 0) {
-			perror("sched_yield");
-		}
+		ts.tv_sec = 0;
+		ts.tv_nsec = 1000000;
+		nanosleep(&ts, NULL);
 		i++;
-		if (i > 100000) {
+		if (i > 5000) {
 			fprintf(stderr, "looping too long waiting for signal\n");
 			exit(EXIT_FAILURE);
 		}
@@ -101,11 +102,12 @@ static void* thread1(void* arg) {
 
 // Test calling a Go function to raise SIGIO on a C thread with an
 // alternate signal stack when there is a Go signal handler for SIGIO.
-static void* thread2(void* arg) {
-	pthread_t* ptid = (pthread_t*)(arg);
+static void* thread2(void* arg __attribute__ ((unused))) {
 	stack_t ss;
 	int i;
 	int oldcount;
+	pthread_t tid;
+	struct timespec ts;
 	stack_t nss;
 
 	// Set up an alternate signal stack for this thread.
@@ -124,16 +126,17 @@ static void* thread2(void* arg) {
 
 	// Call a Go function that will call a C function to send us a
 	// SIGIO.
-	GoRaiseSIGIO(ptid);
+	tid = pthread_self();
+	GoRaiseSIGIO(&tid);
 
 	// Wait until the signal has been delivered.
 	i = 0;
 	while (SIGIOCount() == oldcount) {
-		if (sched_yield() < 0) {
-			perror("sched_yield");
-		}
+		ts.tv_sec = 0;
+		ts.tv_nsec = 1000000;
+		nanosleep(&ts, NULL);
 		i++;
-		if (i > 100000) {
+		if (i > 5000) {
 			fprintf(stderr, "looping too long waiting for signal\n");
 			exit(EXIT_FAILURE);
 		}
@@ -161,7 +164,7 @@ int main(int argc, char **argv) {
 	// Tell the Go library to start looking for SIGIO.
 	GoCatchSIGIO();
 
-	i = pthread_create(&tid, NULL, thread1, (void*)(&tid));
+	i = pthread_create(&tid, NULL, thread1, NULL);
 	if (i != 0) {
 		fprintf(stderr, "pthread_create: %s\n", strerror(i));
 		exit(EXIT_FAILURE);
@@ -173,7 +176,7 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 
-	i = pthread_create(&tid, NULL, thread2, (void*)(&tid));
+	i = pthread_create(&tid, NULL, thread2, NULL);
 	if (i != 0) {
 		fprintf(stderr, "pthread_create: %s\n", strerror(i));
 		exit(EXIT_FAILURE);

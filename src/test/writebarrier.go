@@ -1,6 +1,6 @@
 // errorcheck -0 -l -d=wb
 
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -157,4 +157,82 @@ func t1(i interface{}) **int {
 		return y
 	}
 	return nil
+}
+
+type T17 struct {
+	f func(*T17)
+}
+
+func f17(x *T17) {
+	// Originally from golang.org/issue/13901, but the hybrid
+	// barrier requires both to have barriers.
+	x.f = f17                      // ERROR "write barrier"
+	x.f = func(y *T17) { *y = *x } // ERROR "write barrier"
+}
+
+type T18 struct {
+	a []int
+	s string
+}
+
+func f18(p *T18, x *[]int) {
+	p.a = p.a[:5]    // no barrier
+	*x = (*x)[0:5]   // no barrier
+	p.a = p.a[3:5]   // ERROR "write barrier"
+	p.a = p.a[1:2:3] // ERROR "write barrier"
+	p.s = p.s[8:9]   // ERROR "write barrier"
+	*x = (*x)[3:5]   // ERROR "write barrier"
+}
+
+func f19(x, y *int, i int) int {
+	// Constructing a temporary slice on the stack should not
+	// require any write barriers. See issue 14263.
+	a := []*int{x, y} // no barrier
+	return *a[i]
+}
+
+func f20(x, y *int, i int) []*int {
+	// ... but if that temporary slice escapes, then the
+	// write barriers are necessary.
+	a := []*int{x, y} // ERROR "write barrier"
+	return a
+}
+
+var x21 *int
+var y21 struct {
+	x *int
+}
+var z21 int
+
+func f21(x *int) {
+	// Global -> heap pointer updates must have write barriers.
+	x21 = x                   // ERROR "write barrier"
+	y21.x = x                 // ERROR "write barrier"
+	x21 = &z21                // ERROR "write barrier"
+	y21.x = &z21              // ERROR "write barrier"
+	y21 = struct{ x *int }{x} // ERROR "write barrier"
+}
+
+func f22(x *int) (y *int) {
+	// pointer write on stack should have no write barrier.
+	// this is a case that the frontend failed to eliminate.
+	p := &y
+	*p = x // no barrier
+	return
+}
+
+type T23 struct {
+	p *int
+	a int
+}
+
+var t23 T23
+var i23 int
+
+func f23() {
+	// zeroing global needs write barrier for the hybrid barrier.
+	t23 = T23{} // ERROR "write barrier"
+	// also test partial assignments
+	t23 = T23{a: 1}    // ERROR "write barrier"
+	t23 = T23{p: &i23} // ERROR "write barrier"
 }

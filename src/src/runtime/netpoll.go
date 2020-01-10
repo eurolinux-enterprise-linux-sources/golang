@@ -39,6 +39,10 @@ const (
 const pollBlockSize = 4 * 1024
 
 // Network poller descriptor.
+//
+// No heap pointers.
+//
+//go:notinheap
 type pollDesc struct {
 	link *pollDesc // in pollcache, protected by pollcache.lock
 
@@ -122,7 +126,7 @@ func net_runtime_pollClose(pd *pollDesc) {
 	if pd.rg != 0 && pd.rg != pdReady {
 		throw("netpollClose: blocked read on closing descriptor")
 	}
-	netpollclose(uintptr(pd.fd))
+	netpollclose(pd.fd)
 	pollcache.free(pd)
 }
 

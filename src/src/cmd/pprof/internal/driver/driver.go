@@ -23,10 +23,13 @@ import (
 
 	"cmd/pprof/internal/commands"
 	"cmd/pprof/internal/plugin"
-	"cmd/pprof/internal/profile"
 	"cmd/pprof/internal/report"
 	"cmd/pprof/internal/tempfile"
+	"internal/pprof/profile"
 )
+
+// cpuProfileHandler is the Go pprof CPU profile handler URL.
+const cpuProfileHandler = "/debug/pprof/profile"
 
 // PProf acquires a profile, and symbolizes it using a profile
 // manager. Then it generates a report formatted according to the
@@ -139,7 +142,7 @@ func adjustURL(source string, sec int, ui plugin.UI) (adjusted, host string, dur
 	if err != nil || (url.Host == "" && url.Scheme != "" && url.Scheme != "file") {
 		url, err = url.Parse("http://" + source)
 		if err != nil {
-			return source, url.Host, time.Duration(30) * time.Second
+			return source, "", 0
 		}
 	}
 	if scheme := strings.ToLower(url.Scheme); scheme == "" || scheme == "file" {
@@ -160,10 +163,10 @@ func adjustURL(source string, sec int, ui plugin.UI) (adjusted, host string, dur
 	switch strings.ToLower(url.Path) {
 	case "", "/":
 		// Apply default /profilez.
-		url.Path = "/profilez"
+		url.Path = cpuProfileHandler
 	case "/protoz":
 		// Rewrite to /profilez?type=proto
-		url.Path = "/profilez"
+		url.Path = cpuProfileHandler
 		values.Set("type", "proto")
 	}
 
@@ -712,8 +715,9 @@ func processFlags(p *profile.Profile, ui plugin.UI, f *flags) error {
 	flagPeek := f.isFormat("peek")
 	flagWebList := f.isFormat("weblist")
 	flagList := f.isFormat("list")
+	flagCallgrind := f.isFormat("callgrind")
 
-	if flagDis || flagWebList {
+	if flagDis || flagWebList || flagCallgrind {
 		// Collect all samples at address granularity for assembly
 		// listing.
 		f.flagNodeCount = newInt(0)
@@ -776,14 +780,14 @@ func processFlags(p *profile.Profile, ui plugin.UI, f *flags) error {
 
 	var err error
 	si, sm := *f.flagSampleIndex, *f.flagMean || *f.flagMeanDelay
-	si, err = sampleIndex(p, &f.flagTotalDelay, si, 1, "delay", "-total_delay", err)
-	si, err = sampleIndex(p, &f.flagMeanDelay, si, 1, "delay", "-mean_delay", err)
-	si, err = sampleIndex(p, &f.flagContentions, si, 0, "contentions", "-contentions", err)
+	si, err = sampleIndex(p, &f.flagTotalDelay, si, "delay", "-total_delay", err)
+	si, err = sampleIndex(p, &f.flagMeanDelay, si, "delay", "-mean_delay", err)
+	si, err = sampleIndex(p, &f.flagContentions, si, "contentions", "-contentions", err)
 
-	si, err = sampleIndex(p, &f.flagInUseSpace, si, 1, "inuse_space", "-inuse_space", err)
-	si, err = sampleIndex(p, &f.flagInUseObjects, si, 0, "inuse_objects", "-inuse_objects", err)
-	si, err = sampleIndex(p, &f.flagAllocSpace, si, 1, "alloc_space", "-alloc_space", err)
-	si, err = sampleIndex(p, &f.flagAllocObjects, si, 0, "alloc_objects", "-alloc_objects", err)
+	si, err = sampleIndex(p, &f.flagInUseSpace, si, "inuse_space", "-inuse_space", err)
+	si, err = sampleIndex(p, &f.flagInUseObjects, si, "inuse_objects", "-inuse_objects", err)
+	si, err = sampleIndex(p, &f.flagAllocSpace, si, "alloc_space", "-alloc_space", err)
+	si, err = sampleIndex(p, &f.flagAllocObjects, si, "alloc_objects", "-alloc_objects", err)
 
 	if si == -1 {
 		// Use last value if none is requested.
@@ -802,7 +806,6 @@ func processFlags(p *profile.Profile, ui plugin.UI, f *flags) error {
 
 func sampleIndex(p *profile.Profile, flag **bool,
 	sampleIndex int,
-	newSampleIndex int,
 	sampleType, option string,
 	err error) (int, error) {
 	if err != nil || !**flag {
@@ -812,11 +815,12 @@ func sampleIndex(p *profile.Profile, flag **bool,
 	if sampleIndex != -1 {
 		return 0, fmt.Errorf("set at most one sample value selection option")
 	}
-	if newSampleIndex >= len(p.SampleType) ||
-		p.SampleType[newSampleIndex].Type != sampleType {
-		return 0, fmt.Errorf("option %s not valid for this profile", option)
+	for index, s := range p.SampleType {
+		if sampleType == s.Type {
+			return index, nil
+		}
 	}
-	return newSampleIndex, nil
+	return 0, fmt.Errorf("option %s not valid for this profile", option)
 }
 
 func countFlags(bs []*bool) int {
@@ -904,16 +908,13 @@ func aggregate(prof *profile.Profile, f *flags) error {
 	switch {
 	case f.isFormat("proto"), f.isFormat("raw"):
 		// No aggregation for raw profiles.
-	case f.isFormat("callgrind"):
-		// Aggregate to file/line for callgrind.
-		fallthrough
 	case *f.flagLines:
 		return prof.Aggregate(true, true, true, true, false)
 	case *f.flagFiles:
 		return prof.Aggregate(true, false, true, false, false)
 	case *f.flagFunctions:
 		return prof.Aggregate(true, true, false, false, false)
-	case f.isFormat("weblist"), f.isFormat("disasm"):
+	case f.isFormat("weblist"), f.isFormat("disasm"), f.isFormat("callgrind"):
 		return prof.Aggregate(false, true, true, true, true)
 	}
 	return nil

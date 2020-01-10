@@ -14,7 +14,7 @@ import (
 
 	"cmd/pprof/internal/commands"
 	"cmd/pprof/internal/plugin"
-	"cmd/pprof/internal/profile"
+	"internal/pprof/profile"
 )
 
 var profileFunctionNames = []string{}

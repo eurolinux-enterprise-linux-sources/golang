@@ -52,7 +52,7 @@ TEXT runtime·nanotime1(SB),NOSPLIT,$0
 // pipe(3c) wrapper that returns fds in AX, DX.
 // NOT USING GO CALLING CONVENTION.
 TEXT runtime·pipe1(SB),NOSPLIT,$0
-	SUBQ	$16, SP // 8 bytes will do, but stack has to be 16-byte alligned
+	SUBQ	$16, SP // 8 bytes will do, but stack has to be 16-byte aligned
 	MOVQ	SP, DI
 	LEAQ	libc_pipe(SB), AX
 	CALL	AX
@@ -173,7 +173,11 @@ TEXT runtime·sigtramp(SB),NOSPLIT,$0
 	MOVQ	g(BX), R10
 	CMPQ	R10, $0
 	JNE	allgood
+	MOVQ	SI, 80(SP)
+	MOVQ	DX, 88(SP)
+	LEAQ	80(SP), AX
 	MOVQ	DI, 0(SP)
+	MOVQ	AX, 8(SP)
 	MOVQ	$runtime·badsignal(SB), AX
 	CALL	AX
 	JMP	exit
@@ -283,6 +287,19 @@ exit:
 	MOVQ	72(SP), R15
 
 	ADDQ    $184, SP
+	RET
+
+TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
+	MOVQ	fn+0(FP),    AX
+	MOVL	sig+8(FP),   DI
+	MOVQ	info+16(FP), SI
+	MOVQ	ctx+24(FP),  DX
+	PUSHQ	BP
+	MOVQ	SP, BP
+	ANDQ	$~15, SP     // alignment for x86_64 ABI
+	CALL	AX
+	MOVQ	BP, SP
+	POPQ	BP
 	RET
 
 // Called from runtime·usleep (Go). Can be called on Go stack, on OS stack,

@@ -229,7 +229,7 @@ func assemblyPerSourceLine(objSyms []*objSymbol, rs nodes, src string, obj plugi
 func findMatchingSymbol(objSyms []*objSymbol, ns nodes) *objSymbol {
 	for _, n := range ns {
 		for _, o := range objSyms {
-			if filepath.Base(o.sym.File) == n.info.objfile &&
+			if o.sym.File == n.info.objfile &&
 				o.sym.Start <= n.info.address-o.base &&
 				n.info.address-o.base <= o.sym.End {
 				return o
@@ -257,7 +257,7 @@ func printHeader(w io.Writer, rpt *Report) {
 // printFunctionHeader prints a function header for a weblist report.
 func printFunctionHeader(w io.Writer, name, path string, flatSum, cumSum int64, rpt *Report) {
 	fmt.Fprintf(w, `<h1>%s</h1>%s
-<pre onClick="pprof_toggle_asm()">
+<pre onClick="pprof_toggle_asm(event)">
   Total:  %10s %10s (flat, cum) %s
 `,
 		template.HTMLEscapeString(name), template.HTMLEscapeString(path),
@@ -408,7 +408,7 @@ func getMissingFunctionSource(filename string, asm map[int]nodes, start, end int
 	return fnodes, filename
 }
 
-// adjustSourcePath adjusts the pathe for a source file by trimmming
+// adjustSourcePath adjusts the path for a source file by trimming
 // known prefixes and searching for the file on all parents of the
 // current working dir.
 func adjustSourcePath(path string) (*os.File, string, error) {

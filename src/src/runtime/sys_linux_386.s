@@ -98,15 +98,18 @@ TEXT runtime·usleep(SB),NOSPLIT,$8
 	MOVL	$1000000, CX
 	DIVL	CX
 	MOVL	AX, 0(SP)
+	MOVL	$1000, AX	// usec to nsec
+	MULL	DX
 	MOVL	DX, 4(SP)
 
-	// select(0, 0, 0, 0, &tv)
-	MOVL	$142, AX
+	// pselect6(0, 0, 0, 0, &ts, 0)
+	MOVL	$308, AX
 	MOVL	$0, BX
 	MOVL	$0, CX
 	MOVL	$0, DX
 	MOVL	$0, SI
 	LEAL	0(SP), DI
+	MOVL	$0, BP
 	INVOKE_SYSCALL
 	RET
 
@@ -191,7 +194,7 @@ TEXT runtime·nanotime(SB), NOSPLIT, $32
 
 TEXT runtime·rtsigprocmask(SB),NOSPLIT,$0
 	MOVL	$175, AX		// syscall entry
-	MOVL	sig+0(FP), BX
+	MOVL	how+0(FP), BX
 	MOVL	new+4(FP), CX
 	MOVL	old+8(FP), DX
 	MOVL	size+12(FP), SI
@@ -212,25 +215,47 @@ TEXT runtime·rt_sigaction(SB),NOSPLIT,$0
 	RET
 
 TEXT runtime·sigfwd(SB),NOSPLIT,$12-16
-	MOVL	sig+4(FP), AX
-	MOVL	AX, 0(SP)
-	MOVL	info+8(FP), AX
-	MOVL	AX, 4(SP)
-	MOVL	ctx+12(FP), AX
-	MOVL	AX, 8(SP)
 	MOVL	fn+0(FP), AX
+	MOVL	sig+4(FP), BX
+	MOVL	info+8(FP), CX
+	MOVL	ctx+12(FP), DX
+	MOVL	SP, SI
+	SUBL	$32, SP
+	ANDL	$-15, SP	// align stack: handler might be a C function
+	MOVL	BX, 0(SP)
+	MOVL	CX, 4(SP)
+	MOVL	DX, 8(SP)
+	MOVL	SI, 12(SP)	// save SI: handler might be a Go function
 	CALL	AX
+	MOVL	12(SP), AX
+	MOVL	AX, SP
 	RET
 
-TEXT runtime·sigtramp(SB),NOSPLIT,$12
+TEXT runtime·sigtramp(SB),NOSPLIT,$28
+	// Save callee-saved C registers, since the caller may be a C signal handler.
+	MOVL	BX, bx-4(SP)
+	MOVL	BP, bp-8(SP)
+	MOVL	SI, si-12(SP)
+	MOVL	DI, di-16(SP)
+	// We don't save mxcsr or the x87 control word because sigtrampgo doesn't
+	// modify them.
+
 	MOVL	sig+0(FP), BX
 	MOVL	BX, 0(SP)
 	MOVL	info+4(FP), BX
 	MOVL	BX, 4(SP)
-	MOVL	context+8(FP), BX
+	MOVL	ctx+8(FP), BX
 	MOVL	BX, 8(SP)
 	CALL	runtime·sigtrampgo(SB)
+
+	MOVL	di-16(SP), DI
+	MOVL	si-12(SP), SI
+	MOVL	bp-8(SP),  BP
+	MOVL	bx-4(SP),  BX
 	RET
+
+TEXT runtime·cgoSigtramp(SB),NOSPLIT,$0
+	JMP	runtime·sigtramp(SB)
 
 TEXT runtime·sigreturn(SB),NOSPLIT,$0
 	MOVL	$173, AX	// rt_sigreturn
@@ -294,15 +319,15 @@ TEXT runtime·futex(SB),NOSPLIT,$0
 TEXT runtime·clone(SB),NOSPLIT,$0
 	MOVL	$120, AX	// clone
 	MOVL	flags+0(FP), BX
-	MOVL	stack+4(FP), CX
+	MOVL	stk+4(FP), CX
 	MOVL	$0, DX	// parent tid ptr
 	MOVL	$0, DI	// child tid ptr
 
 	// Copy mp, gp, fn off parent stack for use by child.
 	SUBL	$16, CX
-	MOVL	mm+8(FP), SI
+	MOVL	mp+8(FP), SI
 	MOVL	SI, 0(CX)
-	MOVL	gg+12(FP), SI
+	MOVL	gp+12(FP), SI
 	MOVL	SI, 4(CX)
 	MOVL	fn+16(FP), SI
 	MOVL	SI, 8(CX)
@@ -355,7 +380,7 @@ TEXT runtime·clone(SB),NOSPLIT,$0
 	POPL	AX
 	POPAL
 
-	// Now segment is established.  Initialize m, g.
+	// Now segment is established. Initialize m, g.
 	get_tls(AX)
 	MOVL	DX, g(AX)
 	MOVL	BX, g_m(DX)
@@ -376,8 +401,8 @@ nog:
 
 TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
 	MOVL	$186, AX	// sigaltstack
-	MOVL	new+4(SP), BX
-	MOVL	old+8(SP), CX
+	MOVL	new+0(FP), BX
+	MOVL	old+4(FP), CX
 	INVOKE_SYSCALL
 	CMPL	AX, $0xfffff001
 	JLS	2(PC)
@@ -406,9 +431,18 @@ TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
 #define SEG_NOT_PRESENT 0x20
 #define USEABLE 0x40
 
+// `-1` means the kernel will pick a TLS entry on the first setldt call,
+// which happens during runtime init, and that we'll store back the saved
+// entry and reuse that on subsequent calls when creating new threads.
+DATA  runtime·tls_entry_number+0(SB)/4, $-1
+GLOBL runtime·tls_entry_number(SB), NOPTR, $4
+
 // setldt(int entry, int address, int limit)
+// We use set_thread_area, which mucks with the GDT, instead of modify_ldt,
+// which would modify the LDT, but is disabled on some kernels.
+// The name, setldt, is a misnomer, although we leave this name as it is for
+// the compatibility with other platforms.
 TEXT runtime·setldt(SB),NOSPLIT,$32
-	MOVL	entry+0(FP), BX	// entry
 	MOVL	address+4(FP), DX	// base address
 
 #ifdef GOOS_android
@@ -437,18 +471,19 @@ TEXT runtime·setldt(SB),NOSPLIT,$32
 	MOVL	DX, 0(DX)
 #endif
 
+	// get entry number
+	MOVL	runtime·tls_entry_number(SB), CX
+
 	// set up user_desc
 	LEAL	16(SP), AX	// struct user_desc
-	MOVL	BX, 0(AX)
-	MOVL	DX, 4(AX)
-	MOVL	$0xfffff, 8(AX)
+	MOVL	CX, 0(AX)	// unsigned int entry_number
+	MOVL	DX, 4(AX)	// unsigned long base_addr
+	MOVL	$0xfffff, 8(AX)	// unsigned int limit
 	MOVL	$(SEG_32BIT|LIMIT_IN_PAGES|USEABLE|CONTENTS_DATA), 12(AX)	// flag bits
 
-	// call modify_ldt
-	MOVL	$1, BX	// func = 1 (write)
-	MOVL	AX, CX	// user_desc
-	MOVL	$16, DX	// sizeof(user_desc)
-	MOVL	$123, AX	// syscall - modify_ldt
+	// call set_thread_area
+	MOVL	AX, BX	// user_desc
+	MOVL	$243, AX	// syscall - set_thread_area
 	// We can't call this via 0x10(GS) because this is called from setldt0 to set that up.
 	INT     $0x80
 
@@ -457,10 +492,18 @@ TEXT runtime·setldt(SB),NOSPLIT,$32
 	JLS 2(PC)
 	INT $3
 
-	// compute segment selector - (entry*8+7)
-	MOVL	entry+0(FP), AX
+	// read allocated entry number back out of user_desc
+	LEAL	16(SP), AX	// get our user_desc back
+	MOVL	0(AX), AX
+
+	// store entry number if the kernel allocated it
+	CMPL	CX, $-1
+	JNE	2(PC)
+	MOVL	AX, runtime·tls_entry_number(SB)
+
+	// compute segment selector - (entry*8+3)
 	SHLL	$3, AX
-	ADDL	$7, AX
+	ADDL	$3, AX
 	MOVW	AX, GS
 
 	RET

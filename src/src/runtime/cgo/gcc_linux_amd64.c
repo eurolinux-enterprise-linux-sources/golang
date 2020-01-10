@@ -1,8 +1,6 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-
-// +build cgo
 
 #include <pthread.h>
 #include <errno.h>
@@ -10,6 +8,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include "libcgo.h"
+#include "libcgo_unix.h"
 
 static void* threadentry(void*);
 static void (*setg_gcc)(void*);
@@ -72,7 +71,7 @@ _cgo_sys_thread_start(ThreadStart *ts)
 	pthread_attr_getstacksize(&attr, &size);
 	// Leave stacklo=0 and set stackhi=size; mstack will do the rest.
 	ts->g->stackhi = size;
-	err = pthread_create(&p, &attr, threadentry, ts);
+	err = _cgo_try_pthread_create(&p, &attr, threadentry, ts);
 
 	pthread_sigmask(SIG_SETMASK, &oset, nil);
 
@@ -91,7 +90,9 @@ threadentry(void *v)
 	ThreadStart ts;
 
 	ts = *(ThreadStart*)v;
+	_cgo_tsan_acquire();
 	free(v);
+	_cgo_tsan_release();
 
 	/*
 	 * Set specific keys.

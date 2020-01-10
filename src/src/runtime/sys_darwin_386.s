@@ -196,15 +196,16 @@ timeloop:
 
 systime:
 	// Fall back to system call (usually first call in this thread)
-	LEAL	12(SP), AX	// must be non-nil, unused
+	LEAL	16(SP), AX	// must be non-nil, unused
 	MOVL	AX, 4(SP)
 	MOVL	$0, 8(SP)	// time zone pointer
-	MOVL	$116, AX
+	MOVL	$0, 12(SP)	// required as of Sierra; Issue 16570
+	MOVL	$116, AX // SYS_GETTIMEOFDAY
 	INT	$0x80
 	CMPL	AX, $0
 	JNE	inreg
-	MOVL	12(SP), AX
-	MOVL	16(SP), DX
+	MOVL	16(SP), AX
+	MOVL	20(SP), DX
 inreg:
 	// sec is in AX, usec in DX
 	// convert to DX:AX nsec
@@ -253,52 +254,37 @@ TEXT runtime·sigfwd(SB),NOSPLIT,$0-16
 	MOVL	info+8(FP), CX
 	MOVL	ctx+12(FP), DX
 	MOVL	SP, SI
-	SUBL	$32, SP		// align stack; handler might be C code
-	ANDL	$~15, SP
+	SUBL	$32, SP
+	ANDL	$~15, SP	// align stack: handler might be a C function
 	MOVL	BX, 0(SP)
 	MOVL	CX, 4(SP)
 	MOVL	DX, 8(SP)
-	MOVL	SI, 12(SP)
+	MOVL	SI, 12(SP)	// save SI: handler might be a Go function
 	CALL	AX
 	MOVL	12(SP), AX
 	MOVL	AX, SP
-	RET
-
-TEXT runtime·sigreturn(SB),NOSPLIT,$12-8
-	MOVL	ctx+0(FP), CX
-	MOVL	infostyle+4(FP), BX
-	MOVL	$0, 0(SP)	// "caller PC" - ignored
-	MOVL	CX, 4(SP)
-	MOVL	BX, 8(SP)
-	MOVL	$184, AX	// sigreturn(ucontext, infostyle)
-	INT	$0x80
-	MOVL	$0xf1, 0xf1  // crash
 	RET
 
 // Sigtramp's job is to call the actual signal handler.
 // It is called with the following arguments on the stack:
 //	0(SP)	"return address" - ignored
 //	4(SP)	actual handler
-//	8(SP)	signal number
-//	12(SP)	siginfo style
+//	8(SP)	siginfo style
+//	12(SP)	signal number
 //	16(SP)	siginfo
 //	20(SP)	context
 TEXT runtime·sigtramp(SB),NOSPLIT,$20
-	MOVL	fn+0(FP), BX
-	MOVL	BX, 0(SP)
-	MOVL	style+4(FP), BX
-	MOVL	BX, 4(SP)
 	MOVL	sig+8(FP), BX
-	MOVL	BX, 8(SP)
+	MOVL	BX, 0(SP)
 	MOVL	info+12(FP), BX
-	MOVL	BX, 12(SP)
-	MOVL	context+16(FP), BX
-	MOVL	BX, 16(SP)
+	MOVL	BX, 4(SP)
+	MOVL	ctx+16(FP), BX
+	MOVL	BX, 8(SP)
 	CALL	runtime·sigtrampgo(SB)
 
 	// call sigreturn
-	MOVL	context+16(FP), CX
-	MOVL	style+4(FP), BX
+	MOVL	ctx+16(FP), CX
+	MOVL	infostyle+4(FP), BX
 	MOVL	$0, 0(SP)	// "caller PC" - ignored
 	MOVL	CX, 4(SP)
 	MOVL	BX, 8(SP)
@@ -382,7 +368,7 @@ TEXT runtime·bsdthread_start(SB),NOSPLIT,$0
 	POPL	AX
 	POPAL
 
-	// Now segment is established.  Initialize m, g.
+	// Now segment is established. Initialize m, g.
 	get_tls(BP)
 	MOVL    m_g0(DX), AX
 	MOVL	AX, g(BP)

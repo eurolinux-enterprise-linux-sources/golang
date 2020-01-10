@@ -7,7 +7,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2008 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -44,7 +44,7 @@ const (
 )
 
 const (
-	REG_R0 = obj.RBaseMIPS64 + iota
+	REG_R0 = obj.RBaseMIPS + iota
 	REG_R1
 	REG_R2
 	REG_R3
@@ -185,22 +185,18 @@ const (
 
 	REG_SPECIAL = REG_M0
 
-	REGZERO  = REG_R0 /* set to zero */
-	REGSP    = REG_R29
-	REGSB    = REG_R30
-	REGLINK  = REG_R31
-	REGRET   = REG_R1
-	REGARG   = -1      /* -1 disables passing the first argument in register */
-	REGRT1   = REG_R1  /* reserved for runtime, duffzero and duffcopy */
-	REGRT2   = REG_R2  /* reserved for runtime, duffcopy */
-	REGCTXT  = REG_R22 /* context for closures */
-	REGG     = REG_R30 /* G */
-	REGTMP   = REG_R28 /* used by the linker */
-	FREGRET  = REG_F0
-	FREGZERO = REG_F24 /* both float and double */
-	FREGHALF = REG_F26 /* double */
-	FREGONE  = REG_F28 /* double */
-	FREGTWO  = REG_F30 /* double */
+	REGZERO = REG_R0 /* set to zero */
+	REGSP   = REG_R29
+	REGSB   = REG_R28
+	REGLINK = REG_R31
+	REGRET  = REG_R1
+	REGARG  = -1      /* -1 disables passing the first argument in register */
+	REGRT1  = REG_R1  /* reserved for runtime, duffzero and duffcopy */
+	REGRT2  = REG_R2  /* reserved for runtime, duffcopy */
+	REGCTXT = REG_R22 /* context for closures */
+	REGG    = REG_R30 /* G */
+	REGTMP  = REG_R23 /* used by the linker */
+	FREGRET = REG_F0
 )
 
 const (
@@ -219,6 +215,11 @@ const (
 	NOSCHED = 1 << 7
 
 	NSCHED = 20
+)
+
+const (
+	Mips32 = 32
+	Mips64 = 64
 )
 
 const (
@@ -243,6 +244,7 @@ const (
 	C_LACON /* $n(REG) where int16 < n <= int32 */
 	C_LECON
 	C_DACON /* $n(REG) where int32 < n */
+	C_STCON /* $tlsvar */
 	C_SBRA
 	C_LBRA
 	C_SAUTO
@@ -254,13 +256,14 @@ const (
 	C_LOREG
 	C_GOK
 	C_ADDR
+	C_TLS
 	C_TEXTSIZE
 
 	C_NCLASS /* must be the last */
 )
 
 const (
-	AABSD = obj.ABaseMIPS64 + obj.A_ARCHSPECIFIC + iota
+	AABSD = obj.ABaseMIPS + obj.A_ARCHSPECIFIC + iota
 	AABSF
 	AABSW
 	AADD
@@ -280,6 +283,12 @@ const (
 	ABLTZAL
 	ABNE
 	ABREAK
+	ACLO
+	ACLZ
+	ACMOVF
+	ACMOVN
+	ACMOVT
+	ACMOVZ
 	ACMPEQD
 	ACMPEQF
 	ACMPGED
@@ -292,6 +301,8 @@ const (
 	ADIVU
 	ADIVW
 	AGOK
+	ALL
+	ALUI
 	AMOVB
 	AMOVBU
 	AMOVD
@@ -320,9 +331,12 @@ const (
 	AREM
 	AREMU
 	ARFE
+	ASC
 	ASGT
 	ASGTU
 	ASLL
+	ASQRTD
+	ASQRTF
 	ASRA
 	ASRL
 	ASUB
@@ -330,11 +344,14 @@ const (
 	ASUBF
 	ASUBU
 	ASUBW
+	ASYNC
 	ASYSCALL
+	ATEQ
 	ATLBP
 	ATLBR
 	ATLBWI
 	ATLBWR
+	ATNE
 	AWORD
 	AXOR
 

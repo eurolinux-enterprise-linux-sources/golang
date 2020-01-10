@@ -1,6 +1,6 @@
 // errorcheck
 
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -27,9 +27,9 @@ func tuple() (int, int, int) { return 1, 2, 3 }
 
 var (
 	_ = sum(tuple())
-	_ = sum(tuple()...) // ERROR "multiple-value|[.][.][.]"
+	_ = sum(tuple()...) // ERROR "multiple-value"
 	_ = sum3(tuple())
-	_ = sum3(tuple()...) // ERROR "multiple-value|[.][.][.]" "not enough"
+	_ = sum3(tuple()...) // ERROR "multiple-value" "not enough"
 )
 
 type T []T
@@ -59,4 +59,3 @@ func bad(args ...int) {
 	_ = [...]byte("foo") // ERROR "[.][.][.]"
 	_ = [...][...]int{{1,2,3},{4,5,6}}	// ERROR "[.][.][.]"
 }
-

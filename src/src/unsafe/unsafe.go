@@ -11,10 +11,10 @@
 package unsafe
 
 // ArbitraryType is here for the purposes of documentation only and is not actually
-// part of the unsafe package.  It represents the type of an arbitrary Go expression.
+// part of the unsafe package. It represents the type of an arbitrary Go expression.
 type ArbitraryType int
 
-// Pointer represents a pointer to an arbitrary type.  There are four special operations
+// Pointer represents a pointer to an arbitrary type. There are four special operations
 // available for type Pointer that are not available for other types:
 //	- A pointer value of any type can be converted to a Pointer.
 //	- A Pointer can be converted to a pointer value of any type.
@@ -76,8 +76,10 @@ type ArbitraryType int
 //	// equivalent to e := unsafe.Pointer(&x[i])
 //	e := unsafe.Pointer(uintptr(unsafe.Pointer(&x[0])) + i*unsafe.Sizeof(x[0]))
 //
-// It is valid both to add and to subtract offsets from a pointer in this way,
-// but the result must continue to point into the original allocated object.
+// It is valid both to add and to subtract offsets from a pointer in this way.
+// It is also valid to use &^ to round pointers, usually for alignment.
+// In all cases, the result must continue to point into the original allocated object.
+//
 // Unlike in C, it is not valid to advance a pointer just beyond the end of
 // its original allocation:
 //
@@ -153,7 +155,7 @@ type ArbitraryType int
 //	var s string
 //	hdr := (*reflect.StringHeader)(unsafe.Pointer(&s)) // case 1
 //	hdr.Data = uintptr(unsafe.Pointer(p))              // case 6 (this case)
-//	hdr.Len = uintptr(n)
+//	hdr.Len = n
 //
 // In this usage hdr.Data is really an alternate way to refer to the underlying
 // pointer in the slice header, not a uintptr variable itself.
@@ -166,7 +168,7 @@ type ArbitraryType int
 //	// INVALID: a directly-declared header will not hold Data as a reference.
 //	var hdr reflect.StringHeader
 //	hdr.Data = uintptr(unsafe.Pointer(p))
-//	hdr.Len = uintptr(n)
+//	hdr.Len = n
 //	s := *(*string)(unsafe.Pointer(&hdr)) // p possibly already lost
 //
 type Pointer *ArbitraryType
@@ -179,7 +181,7 @@ type Pointer *ArbitraryType
 func Sizeof(x ArbitraryType) uintptr
 
 // Offsetof returns the offset within the struct of the field represented by x,
-// which must be of the form structValue.field.  In other words, it returns the
+// which must be of the form structValue.field. In other words, it returns the
 // number of bytes between the start of the struct and the start of the field.
 func Offsetof(x ArbitraryType) uintptr
 
@@ -189,6 +191,6 @@ func Offsetof(x ArbitraryType) uintptr
 // It is the same as the value returned by reflect.TypeOf(x).Align().
 // As a special case, if a variable s is of struct type and f is a field
 // within that struct, then Alignof(s.f) will return the required alignment
-// of a field of that type within a struct.  This case is the same as the
+// of a field of that type within a struct. This case is the same as the
 // value returned by reflect.TypeOf(s.f).FieldAlign().
 func Alignof(x ArbitraryType) uintptr

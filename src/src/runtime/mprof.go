@@ -22,6 +22,7 @@ const (
 	// profile types
 	memProfile bucketType = 1 + iota
 	blockProfile
+	mutexProfile
 
 	// size of bucket hash table
 	buckHashSize = 179999
@@ -40,10 +41,14 @@ type bucketType int
 //
 // Per-call-stack profiling information.
 // Lookup by hashing call stack into a linked-list hash table.
+//
+// No heap pointers.
+//
+//go:notinheap
 type bucket struct {
 	next    *bucket
 	allnext *bucket
-	typ     bucketType // memBucket or blockBucket
+	typ     bucketType // memBucket or blockBucket (includes mutexProfile)
 	hash    uintptr
 	size    uintptr
 	nstk    uintptr
@@ -83,7 +88,7 @@ type memRecord struct {
 }
 
 // A blockRecord is the bucket data for a bucket of type blockProfile,
-// part of the blocking profile.
+// which is used in blocking and mutex profiles.
 type blockRecord struct {
 	count  int64
 	cycles int64
@@ -92,6 +97,7 @@ type blockRecord struct {
 var (
 	mbuckets  *bucket // memory profile buckets
 	bbuckets  *bucket // blocking profile buckets
+	xbuckets  *bucket // mutex profile buckets
 	buckhash  *[179999]*bucket
 	bucketmem uintptr
 )
@@ -104,7 +110,7 @@ func newBucket(typ bucketType, nstk int) *bucket {
 		throw("invalid profile bucket type")
 	case memProfile:
 		size += unsafe.Sizeof(memRecord{})
-	case blockProfile:
+	case blockProfile, mutexProfile:
 		size += unsafe.Sizeof(blockRecord{})
 	}
 
@@ -132,7 +138,7 @@ func (b *bucket) mp() *memRecord {
 
 // bp returns the blockRecord associated with the blockProfile bucket b.
 func (b *bucket) bp() *blockRecord {
-	if b.typ != blockProfile {
+	if b.typ != blockProfile && b.typ != mutexProfile {
 		throw("bad use of bucket.bp")
 	}
 	data := add(unsafe.Pointer(b), unsafe.Sizeof(*b)+b.nstk*unsafe.Sizeof(uintptr(0)))
@@ -184,6 +190,9 @@ func stkbucket(typ bucketType, size uintptr, stk []uintptr, alloc bool) *bucket 
 	if typ == memProfile {
 		b.allnext = mbuckets
 		mbuckets = b
+	} else if typ == mutexProfile {
+		b.allnext = xbuckets
+		xbuckets = b
 	} else {
 		b.allnext = bbuckets
 		bbuckets = b
@@ -262,7 +271,7 @@ func mProf_Free(b *bucket, size uintptr) {
 var blockprofilerate uint64 // in CPU ticks
 
 // SetBlockProfileRate controls the fraction of goroutine blocking events
-// that are reported in the blocking profile.  The profiler aims to sample
+// that are reported in the blocking profile. The profiler aims to sample
 // an average of one blocking event per rate nanoseconds spent blocked.
 //
 // To include every blocking event in the profile, pass rate = 1.
@@ -288,10 +297,20 @@ func blockevent(cycles int64, skip int) {
 	if cycles <= 0 {
 		cycles = 1
 	}
-	rate := int64(atomic.Load64(&blockprofilerate))
-	if rate <= 0 || (rate > cycles && int64(fastrand1())%rate > cycles) {
-		return
+	if blocksampled(cycles) {
+		saveblockevent(cycles, skip+1, blockProfile, &blockprofilerate)
 	}
+}
+
+func blocksampled(cycles int64) bool {
+	rate := int64(atomic.Load64(&blockprofilerate))
+	if rate <= 0 || (rate > cycles && int64(fastrand())%rate > cycles) {
+		return false
+	}
+	return true
+}
+
+func saveblockevent(cycles int64, skip int, which bucketType, ratep *uint64) {
 	gp := getg()
 	var nstk int
 	var stk [maxStack]uintptr
@@ -301,10 +320,41 @@ func blockevent(cycles int64, skip int) {
 		nstk = gcallers(gp.m.curg, skip, stk[:])
 	}
 	lock(&proflock)
-	b := stkbucket(blockProfile, 0, stk[:nstk], true)
+	b := stkbucket(which, 0, stk[:nstk], true)
 	b.bp().count++
 	b.bp().cycles += cycles
 	unlock(&proflock)
+}
+
+var mutexprofilerate uint64 // fraction sampled
+
+// SetMutexProfileFraction controls the fraction of mutex contention events
+// that are reported in the mutex profile. On average 1/rate events are
+// reported. The previous rate is returned.
+//
+// To turn off profiling entirely, pass rate 0.
+// To just read the current rate, pass rate -1.
+// (For n>1 the details of sampling may change.)
+func SetMutexProfileFraction(rate int) int {
+	if rate < 0 {
+		return int(mutexprofilerate)
+	}
+	old := mutexprofilerate
+	atomic.Store64(&mutexprofilerate, uint64(rate))
+	return int(old)
+}
+
+//go:linkname mutexevent sync.event
+func mutexevent(cycles int64, skip int) {
+	if cycles < 0 {
+		cycles = 0
+	}
+	rate := int64(atomic.Load64(&mutexprofilerate))
+	// TODO(pjw): measure impact of always calling fastrand vs using something
+	// like malloc.go:nextSample()
+	if rate > 0 && int64(fastrand())%rate == 0 {
+		saveblockevent(cycles, skip+1, mutexProfile, &mutexprofilerate)
+	}
 }
 
 // Go interface to profile data.
@@ -335,7 +385,7 @@ func (r *StackRecord) Stack() []uintptr {
 //
 // The tools that process the memory profiles assume that the
 // profile rate is constant across the lifetime of the program
-// and equal to the current value.  Programs that change the
+// and equal to the current value. Programs that change the
 // memory profiling rate should do so just once, as early as
 // possible in the execution of the program (for example,
 // at the beginning of main).
@@ -438,6 +488,12 @@ func record(r *MemProfileRecord, b *bucket) {
 	r.FreeBytes = int64(mp.free_bytes)
 	r.AllocObjects = int64(mp.allocs)
 	r.FreeObjects = int64(mp.frees)
+	if raceenabled {
+		racewriterangepc(unsafe.Pointer(&r.Stack0[0]), unsafe.Sizeof(r.Stack0), getcallerpc(unsafe.Pointer(&r)), funcPC(MemProfile))
+	}
+	if msanenabled {
+		msanwrite(unsafe.Pointer(&r.Stack0[0]), unsafe.Sizeof(r.Stack0))
+	}
 	copy(r.Stack0[:], b.stk())
 	for i := int(b.nstk); i < len(r.Stack0); i++ {
 		r.Stack0[i] = 0
@@ -448,7 +504,7 @@ func iterate_memprof(fn func(*bucket, uintptr, *uintptr, uintptr, uintptr, uintp
 	lock(&proflock)
 	for b := mbuckets; b != nil; b = b.allnext {
 		mp := b.mp()
-		fn(b, uintptr(b.nstk), &b.stk()[0], b.size, mp.allocs, mp.frees)
+		fn(b, b.nstk, &b.stk()[0], b.size, mp.allocs, mp.frees)
 	}
 	unlock(&proflock)
 }
@@ -478,8 +534,43 @@ func BlockProfile(p []BlockProfileRecord) (n int, ok bool) {
 		for b := bbuckets; b != nil; b = b.allnext {
 			bp := b.bp()
 			r := &p[0]
+			r.Count = bp.count
+			r.Cycles = bp.cycles
+			if raceenabled {
+				racewriterangepc(unsafe.Pointer(&r.Stack0[0]), unsafe.Sizeof(r.Stack0), getcallerpc(unsafe.Pointer(&p)), funcPC(BlockProfile))
+			}
+			if msanenabled {
+				msanwrite(unsafe.Pointer(&r.Stack0[0]), unsafe.Sizeof(r.Stack0))
+			}
+			i := copy(r.Stack0[:], b.stk())
+			for ; i < len(r.Stack0); i++ {
+				r.Stack0[i] = 0
+			}
+			p = p[1:]
+		}
+	}
+	unlock(&proflock)
+	return
+}
+
+// MutexProfile returns n, the number of records in the current mutex profile.
+// If len(p) >= n, MutexProfile copies the profile into p and returns n, true.
+// Otherwise, MutexProfile does not change p, and returns n, false.
+//
+// Most clients should use the runtime/pprof package
+// instead of calling MutexProfile directly.
+func MutexProfile(p []BlockProfileRecord) (n int, ok bool) {
+	lock(&proflock)
+	for b := xbuckets; b != nil; b = b.allnext {
+		n++
+	}
+	if n <= len(p) {
+		ok = true
+		for b := xbuckets; b != nil; b = b.allnext {
+			bp := b.bp()
+			r := &p[0]
 			r.Count = int64(bp.count)
-			r.Cycles = int64(bp.cycles)
+			r.Cycles = bp.cycles
 			i := copy(r.Stack0[:], b.stk())
 			for ; i < len(r.Stack0); i++ {
 				r.Stack0[i] = 0
@@ -506,9 +597,7 @@ func ThreadCreateProfile(p []StackRecord) (n int, ok bool) {
 		ok = true
 		i := 0
 		for mp := first; mp != nil; mp = mp.alllink {
-			for s := range mp.createstack {
-				p[i].Stack0[s] = uintptr(mp.createstack[s])
-			}
+			p[i].Stack0 = mp.createstack
 			i++
 		}
 	}
@@ -626,7 +715,7 @@ func tracealloc(p unsafe.Pointer, size uintptr, typ *_type) {
 	if typ == nil {
 		print("tracealloc(", p, ", ", hex(size), ")\n")
 	} else {
-		print("tracealloc(", p, ", ", hex(size), ", ", *typ._string, ")\n")
+		print("tracealloc(", p, ", ", hex(size), ", ", typ.string(), ")\n")
 	}
 	if gp.m.curg == nil || gp == gp.m.curg {
 		goroutineheader(gp)

@@ -10,7 +10,7 @@ set -e
 
 if [ ! -f src/libgo/libgo.go ]; then
 	cwd=$(pwd)
-	echo 'misc/cgo/testcshared/test.bash is running in $cwd' 1>&2
+	echo "misc/cgo/testcshared/test.bash is running in $cwd" 1>&2
 	exit 1
 fi
 
@@ -18,7 +18,7 @@ goos=$(go env GOOS)
 goarch=$(go env GOARCH)
 goroot=$(go env GOROOT)
 if [ ! -d "$goroot" ]; then
-	echo 'misc/cgo/testcshared/test.bash cannnot find GOROOT' 1>&2
+	echo 'misc/cgo/testcshared/test.bash cannot find GOROOT' 1>&2
 	echo '$GOROOT:' "$GOROOT" 1>&2
 	echo 'go env GOROOT:' "$goroot" 1>&2
 	exit 1
@@ -105,7 +105,7 @@ status=0
 
 # test0: exported symbols in shared lib are accessible.
 # TODO(iant): using _shared here shouldn't really be necessary.
-$(go env CC) ${GOGCCFLAGS} -I ${installdir} -o testp main0.c libgo.$libext
+$(go env CC) ${GOGCCFLAGS} -I ${installdir} -o testp main0.c ./libgo.$libext
 binpush testp
 
 output=$(run LD_LIBRARY_PATH=. ./testp)
@@ -177,6 +177,13 @@ if test "$output" != "PASS"; then
 	./testp5 ./libgo5.$libext verbose
     fi
     status=1
+fi
+
+if test "$libext" = "dylib"; then
+	# make sure dylibs are well-formed
+	if ! otool -l libgo*.dylib >/dev/null; then
+		status=1
+	fi
 fi
 
 if test $status = 0; then

@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors.  All rights reserved.
+// Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -103,11 +103,11 @@ func nm(file string) {
 
 	switch *sortOrder {
 	case "address":
-		sort.Sort(byAddr(syms))
+		sort.Slice(syms, func(i, j int) bool { return syms[i].Addr < syms[j].Addr })
 	case "name":
-		sort.Sort(byName(syms))
+		sort.Slice(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
 	case "size":
-		sort.Sort(bySize(syms))
+		sort.Slice(syms, func(i, j int) bool { return syms[i].Size > syms[j].Size })
 	}
 
 	w := bufio.NewWriter(os.Stdout)
@@ -131,21 +131,3 @@ func nm(file string) {
 	}
 	w.Flush()
 }
-
-type byAddr []objfile.Sym
-
-func (x byAddr) Len() int           { return len(x) }
-func (x byAddr) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
-func (x byAddr) Less(i, j int) bool { return x[i].Addr < x[j].Addr }
-
-type byName []objfile.Sym
-
-func (x byName) Len() int           { return len(x) }
-func (x byName) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
-func (x byName) Less(i, j int) bool { return x[i].Name < x[j].Name }
-
-type bySize []objfile.Sym
-
-func (x bySize) Len() int           { return len(x) }
-func (x bySize) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
-func (x bySize) Less(i, j int) bool { return x[i].Size > x[j].Size }
