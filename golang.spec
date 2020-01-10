@@ -25,7 +25,7 @@
 # Define GOROOT macros
 %global goroot          /usr/lib/%{name}
 %global gopath          %{_datadir}/gocode
-%global golang_arches   x86_64
+%global golang_arches   x86_64 aarch64
 
 # Golang build options.
 
@@ -68,12 +68,16 @@
 %global gohostarch  amd64
 %endif
 
+%ifarch aarch64
+%global gohostarch  arm64
+%endif
+
 %global go_api 1.6
 %global go_version 1.6.3
 
 Name:           golang
 Version:        1.6.3
-Release:        1%{?dist}.1
+Release:        2%{?dist}
 Summary:        The Go Programming Language
 # source tree includes several copies of Mark.Twain-Tom.Sawyer.txt under Public Domain
 License:        BSD and Public Domain
@@ -459,12 +463,21 @@ fi
 %endif
 
 %changelog
-* Wed Jul 20 2016 Jakub Čajka <jcajka@redhat.com> - 1.6.3-1
-- Resolves: rhbz#1358278 - CVE-2016-5386
+* Wed Jul 20 2016 Jakub Čajka <jcajka@redhat.com> - 1.6.3-2
+- Resolves: rhbz#1358279 - CVE-2016-5386
 
-* Wed Jun 15 2016 Jakub Čajka <jcajka@redhat.com> - 1.6.2-1
+* Mon Jun 20 2016 Jakub Čajka <jcajka@redhat.com> - 1.6.2-2
+- Release bump
+
+* Thu May 05 2016 Jakub Čajka <jcajka@redhat.com> - 1.6.2-1
 - rebase to 1.6.2
-- Resolves: rhbz#1346331
+- added aarch64 build
+- fix CVE-2016-3959
+- Resolves: rhbz#1292956, rhbz#1330711, rhbz#1330040
+
+* Fri Apr 01 2016 Jakub Čajka <jcajka@redhat.com> - 1.6-1
+- rebase to 1.6
+- Resolves: rhbz#1290472, rhbz#1279764, rhbz#1266489, rhbz#1292956, rhbz#1096273
 
 * Tue Jun 30 2015 Tomas Hrcka <thrcka@redhat.com> - 1.4.2-9
 - Enable tests during build time
