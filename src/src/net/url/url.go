@@ -309,9 +309,10 @@ func escape(s string, mode encoding) string {
 }
 
 // A URL represents a parsed URL (technically, a URI reference).
+//
 // The general form represented is:
 //
-//	scheme://[userinfo@]host/path[?query][#fragment]
+//	[scheme:][//[userinfo@]host][/]path[?query][#fragment]
 //
 // URLs that do not start with a slash after the scheme are interpreted as:
 //
@@ -321,26 +322,19 @@ func escape(s string, mode encoding) string {
 // A consequence is that it is impossible to tell which slashes in the Path were
 // slashes in the raw URL and which were %2f. This distinction is rarely important,
 // but when it is, code must not use Path directly.
-//
-// Go 1.5 introduced the RawPath field to hold the encoded form of Path.
 // The Parse function sets both Path and RawPath in the URL it returns,
 // and URL's String method uses RawPath if it is a valid encoding of Path,
 // by calling the EscapedPath method.
-//
-// In earlier versions of Go, the more indirect workarounds were that an
-// HTTP server could consult req.RequestURI and an HTTP client could
-// construct a URL struct directly and set the Opaque field instead of Path.
-// These still work as well.
 type URL struct {
 	Scheme     string
 	Opaque     string    // encoded opaque data
 	User       *Userinfo // username and password information
 	Host       string    // host or host:port
-	Path       string
-	RawPath    string // encoded path hint (Go 1.5 and later only; see EscapedPath method)
-	ForceQuery bool   // append a query ('?') even if RawQuery is empty
-	RawQuery   string // encoded query values, without '?'
-	Fragment   string // fragment for references, without '#'
+	Path       string    // path (relative paths may omit leading slash)
+	RawPath    string    // encoded path hint (see EscapedPath method)
+	ForceQuery bool      // append a query ('?') even if RawQuery is empty
+	RawQuery   string    // encoded query values, without '?'
+	Fragment   string    // fragment for references, without '#'
 }
 
 // User returns a Userinfo containing the provided username
@@ -351,6 +345,7 @@ func User(username string) *Userinfo {
 
 // UserPassword returns a Userinfo containing the provided username
 // and password.
+//
 // This functionality should only be used with legacy web sites.
 // RFC 2396 warns that interpreting Userinfo this way
 // ``is NOT RECOMMENDED, because the passing of authentication
@@ -550,6 +545,9 @@ func parseAuthority(authority string) (user *Userinfo, host string, err error) {
 		return nil, host, nil
 	}
 	userinfo := authority[:i]
+	if !validUserinfo(userinfo) {
+		return nil, "", errors.New("net/url: invalid userinfo")
+	}
 	if !strings.Contains(userinfo, ":") {
 		if userinfo, err = unescape(userinfo, encodeUserPassword); err != nil {
 			return nil, "", err
@@ -974,6 +972,8 @@ func (u *URL) ResolveReference(ref *URL) *URL {
 }
 
 // Query parses RawQuery and returns the corresponding values.
+// It silently discards malformed value pairs.
+// To check errors use ParseQuery.
 func (u *URL) Query() Values {
 	v, _ := ParseQuery(u.RawQuery)
 	return v
@@ -1053,4 +1053,34 @@ func (u *URL) UnmarshalBinary(text []byte) error {
 	}
 	*u = *u1
 	return nil
+}
+
+// validUserinfo reports whether s is a valid userinfo string per RFC 3986
+// Section 3.2.1:
+//     userinfo    = *( unreserved / pct-encoded / sub-delims / ":" )
+//     unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
+//     sub-delims  = "!" / "$" / "&" / "'" / "(" / ")"
+//                   / "*" / "+" / "," / ";" / "="
+//
+// It doesn't validate pct-encoded. The caller does that via func unescape.
+func validUserinfo(s string) bool {
+	for _, r := range s {
+		if 'A' <= r && r <= 'Z' {
+			continue
+		}
+		if 'a' <= r && r <= 'z' {
+			continue
+		}
+		if '0' <= r && r <= '9' {
+			continue
+		}
+		switch r {
+		case '-', '.', '_', ':', '~', '!', '$', '&', '\'',
+			'(', ')', '*', '+', ',', ';', '=', '%', '@':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }

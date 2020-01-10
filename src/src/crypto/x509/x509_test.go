@@ -405,6 +405,7 @@ func TestCreateSelfSignedCertificate(t *testing.T) {
 
 			PolicyIdentifiers:   []asn1.ObjectIdentifier{[]int{1, 2, 3}},
 			PermittedDNSDomains: []string{".example.com", "example.com"},
+			ExcludedDNSDomains:  []string{"bar.example.com"},
 
 			CRLDistributionPoints: []string{"http://crl1.example.com/ca1.crl", "http://crl2.example.com/ca1.crl"},
 
@@ -440,6 +441,10 @@ func TestCreateSelfSignedCertificate(t *testing.T) {
 
 		if len(cert.PermittedDNSDomains) != 2 || cert.PermittedDNSDomains[0] != ".example.com" || cert.PermittedDNSDomains[1] != "example.com" {
 			t.Errorf("%s: failed to parse name constraints: %#v", test.name, cert.PermittedDNSDomains)
+		}
+
+		if len(cert.ExcludedDNSDomains) != 1 || cert.ExcludedDNSDomains[0] != "bar.example.com" {
+			t.Errorf("%s: failed to parse name constraint exclusions: %#v", test.name, cert.ExcludedDNSDomains)
 		}
 
 		if cert.Subject.CommonName != commonName {
@@ -514,74 +519,6 @@ func TestCreateSelfSignedCertificate(t *testing.T) {
 			if err != nil {
 				t.Errorf("%s: signature verification failed: %s", test.name, err)
 			}
-		}
-	}
-}
-
-func TestUnknownCriticalExtension(t *testing.T) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("Failed to generate ECDSA key: %s", err)
-	}
-
-	oids := []asn1.ObjectIdentifier{
-		// This OID is in the PKIX arc, but unknown.
-		{2, 5, 29, 999999},
-		// This is a nonsense, unassigned OID.
-		{1, 2, 3, 4},
-	}
-
-	for _, oid := range oids {
-		template := Certificate{
-			SerialNumber: big.NewInt(1),
-			Subject: pkix.Name{
-				CommonName: "foo",
-			},
-			NotBefore: time.Unix(1000, 0),
-			NotAfter:  time.Now().AddDate(1, 0, 0),
-
-			BasicConstraintsValid: true,
-			IsCA: true,
-
-			KeyUsage:    KeyUsageCertSign,
-			ExtKeyUsage: []ExtKeyUsage{ExtKeyUsageServerAuth},
-
-			ExtraExtensions: []pkix.Extension{
-				{
-					Id:       oid,
-					Critical: true,
-					Value:    nil,
-				},
-			},
-		}
-
-		derBytes, err := CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-		if err != nil {
-			t.Fatalf("failed to create certificate: %s", err)
-		}
-
-		cert, err := ParseCertificate(derBytes)
-		if err != nil {
-			t.Fatalf("Certificate with unknown critical extension was not parsed: %s", err)
-		}
-
-		roots := NewCertPool()
-		roots.AddCert(cert)
-
-		// Setting Roots ensures that Verify won't delegate to the OS
-		// library and thus the correct error should always be
-		// returned.
-		_, err = cert.Verify(VerifyOptions{Roots: roots})
-		if err == nil {
-			t.Fatal("Certificate with unknown critical extension was verified without error")
-		}
-		if _, ok := err.(UnhandledCriticalExtension); !ok {
-			t.Fatalf("Error was %#v, but wanted one of type UnhandledCriticalExtension", err)
-		}
-
-		cert.UnhandledCriticalExtensions = nil
-		if _, err = cert.Verify(VerifyOptions{Roots: roots}); err != nil {
-			t.Errorf("Certificate failed to verify after unhandled critical extensions were cleared: %s", err)
 		}
 	}
 }

@@ -87,7 +87,7 @@ func (h HostnameError) Error() string {
 			valid += san.String()
 		}
 	} else {
-		if len(c.DNSNames) > 0 {
+		if c.hasSANExtension() {
 			valid = strings.Join(c.DNSNames, ", ")
 		} else {
 			valid = c.Subject.CommonName
@@ -166,7 +166,7 @@ const (
 
 func matchNameConstraint(domain, constraint string) bool {
 	// The meaning of zero length constraints is not specified, but this
-	// code follows NSS and accepts them as valid for everything.
+	// code follows NSS and accepts them as matching everything.
 	if len(constraint) == 0 {
 		return true
 	}
@@ -191,6 +191,10 @@ func matchNameConstraint(domain, constraint string) bool {
 
 // isValid performs validity checks on the c.
 func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *VerifyOptions) error {
+	if len(c.UnhandledCriticalExtensions) > 0 {
+		return UnhandledCriticalExtension{}
+	}
+
 	if len(currentChain) > 0 {
 		child := currentChain[len(currentChain)-1]
 		if !bytes.Equal(child.RawIssuer, c.RawSubject) {
@@ -216,6 +220,12 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 		}
 
 		if !ok {
+			return CertificateInvalidError{c, CANotAuthorizedForThisName}
+		}
+	}
+
+	for _, constraint := range c.ExcludedDNSDomains {
+		if matchNameConstraint(opts.DNSName, constraint) {
 			return CertificateInvalidError{c, CANotAuthorizedForThisName}
 		}
 	}
@@ -277,10 +287,6 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 	// Use Windows's own verification and chain building.
 	if opts.Roots == nil && runtime.GOOS == "windows" {
 		return c.systemVerify(&opts)
-	}
-
-	if len(c.UnhandledCriticalExtensions) > 0 {
-		return nil, UnhandledCriticalExtension{}
 	}
 
 	if opts.Roots == nil {
@@ -482,7 +488,7 @@ func (c *Certificate) VerifyHostname(h string) error {
 
 	lowered := toLowerCaseASCII(h)
 
-	if len(c.DNSNames) > 0 {
+	if c.hasSANExtension() {
 		for _, match := range c.DNSNames {
 			if matchHostnames(toLowerCaseASCII(match), lowered) {
 				return nil

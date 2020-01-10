@@ -67,6 +67,7 @@ func NewClient(conn net.Conn, host string) (*Client, error) {
 		return nil, err
 	}
 	c := &Client{Text: text, conn: conn, serverName: host, localName: "localhost"}
+	_, c.tls = conn.(*tls.Conn)
 	return c, nil
 }
 
@@ -298,7 +299,7 @@ var testHookStartTLS func(*tls.Config) // nil, except for tests
 // messages is accomplished by including an email address in the to
 // parameter but not including it in the msg headers.
 //
-// The SendMail function and the the net/smtp package are low-level
+// The SendMail function and the net/smtp package are low-level
 // mechanisms and provide no support for DKIM signing, MIME
 // attachments (see the mime/multipart package), or other mail
 // functionality. Higher-level packages exist outside of the standard
